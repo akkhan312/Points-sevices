@@ -1,21 +1,15 @@
-import { Wallet, Transaction, WalletState } from './types';
+import { WalletState } from './types';
 import { WalletLockManager } from './lock';
+import { WalletModel, TransactionModel, IdempotentRequestModel } from './db';
 
 export class PointsWalletService {
-  private wallets = new Map<string, Wallet>();
-  private ledger: Transaction[] = [];
-  private processedRequests = new Map<
-    string,
-    { success: boolean; result?: WalletState; errorMessage?: string }
-  >();
-  private pendingRequests = new Set<string>();
   private lockManager = new WalletLockManager();
 
-  private getOrCreateWallet(userId: string): Wallet {
-    let wallet = this.wallets.get(userId);
+  private async getOrCreateWallet(userId: string) {
+    let wallet = await WalletModel.findOne({ userId });
     if (!wallet) {
-      wallet = { userId, points: 0, cashHalalas: 0 };
-      this.wallets.set(userId, wallet);
+      wallet = new WalletModel({ userId, points: 0, cashHalalas: 0 });
+      await wallet.save();
     }
     return wallet;
   }
@@ -32,46 +26,54 @@ export class PointsWalletService {
       throw new Error('Invalid requestId: must be a non-empty string');
     }
 
-    const cached = this.processedRequests.get(requestId);
-    if (cached) {
-      if (cached.success) {
-        return cached.result!;
+    let requestDoc = await IdempotentRequestModel.findOne({ requestId });
+    if (requestDoc) {
+      if (!requestDoc.inProgress) {
+        if (requestDoc.success) {
+          return requestDoc.result as WalletState;
+        } else {
+          throw new Error(requestDoc.errorMessage!);
+        }
       } else {
-        throw new Error(cached.errorMessage!);
+        throw new Error(`Request with ID ${requestId} is already in progress`);
       }
     }
 
-    if (this.pendingRequests.has(requestId)) {
-      throw new Error(`Request with ID ${requestId} is already in progress`);
+    requestDoc = new IdempotentRequestModel({
+      requestId,
+      inProgress: true
+    });
+    try {
+      await requestDoc.save();
+    } catch (err: any) {
+      if (err.code === 11000) { // Duplicate key
+        throw new Error(`Request with ID ${requestId} is already in progress`);
+      }
+      throw err;
     }
-    this.pendingRequests.add(requestId);
 
     try {
       const release = await this.lockManager.acquire(userId);
       try {
-        const cachedInside = this.processedRequests.get(requestId);
-        if (cachedInside) {
-          if (cachedInside.success) {
-            return cachedInside.result!;
-          } else {
-            throw new Error(cachedInside.errorMessage!);
-          }
-        }
-
-        try {
-          const result = await operation();
-          this.processedRequests.set(requestId, { success: true, result });
-          return result;
-        } catch (err: any) {
-          const msg = err.message || 'Unknown error occurred';
-          this.processedRequests.set(requestId, { success: false, errorMessage: msg });
-          throw err;
-        }
+        const result = await operation();
+        requestDoc.inProgress = false;
+        requestDoc.success = true;
+        requestDoc.result = result;
+        await requestDoc.save();
+        return result;
+      } catch (err: any) {
+        const msg = err.message || 'Unknown error occurred';
+        requestDoc.inProgress = false;
+        requestDoc.success = false;
+        requestDoc.errorMessage = msg;
+        await requestDoc.save();
+        throw err;
       } finally {
         release();
       }
-    } finally {
-      this.pendingRequests.delete(requestId);
+    } catch (err) {
+      // In case acquiring lock fails or unexpected error
+      throw err;
     }
   }
 
@@ -81,18 +83,18 @@ export class PointsWalletService {
     }
 
     return this.executeWithLock(userId, requestId, async () => {
-      const wallet = this.getOrCreateWallet(userId);
+      const wallet = await this.getOrCreateWallet(userId);
       wallet.points += points;
+      await wallet.save();
 
-      const tx: Transaction = {
+      const tx = new TransactionModel({
         requestId,
         userId,
         type: 'award',
         points,
-        cashHalalas: 0,
-        timestamp: new Date(),
-      };
-      this.ledger.push(tx);
+        cashHalalas: 0
+      });
+      await tx.save();
 
       return { userId: wallet.userId, points: wallet.points, cashHalalas: wallet.cashHalalas };
     });
@@ -104,22 +106,22 @@ export class PointsWalletService {
     }
 
     return this.executeWithLock(userId, requestId, async () => {
-      const wallet = this.getOrCreateWallet(userId);
+      const wallet = await this.getOrCreateWallet(userId);
       if (wallet.points < points) {
         throw new Error('Insufficient points balance');
       }
 
       wallet.points -= points;
+      await wallet.save();
 
-      const tx: Transaction = {
+      const tx = new TransactionModel({
         requestId,
         userId,
         type: 'redeem',
         points: -points,
-        cashHalalas: 0,
-        timestamp: new Date(),
-      };
-      this.ledger.push(tx);
+        cashHalalas: 0
+      });
+      await tx.save();
 
       return { userId: wallet.userId, points: wallet.points, cashHalalas: wallet.cashHalalas };
     });
@@ -139,7 +141,7 @@ export class PointsWalletService {
     }
 
     return this.executeWithLock(userId, requestId, async () => {
-      const wallet = this.getOrCreateWallet(userId);
+      const wallet = await this.getOrCreateWallet(userId);
       if (wallet.points < points) {
         throw new Error('Insufficient points balance for conversion');
       }
@@ -148,17 +150,17 @@ export class PointsWalletService {
 
       wallet.points -= points;
       wallet.cashHalalas += cashHalalas;
+      await wallet.save();
 
-      const tx: Transaction = {
+      const tx = new TransactionModel({
         requestId,
         userId,
         type: 'convert_points_to_cash',
         points: -points,
         cashHalalas,
-        timestamp: new Date(),
-        metadata: { rate },
-      };
-      this.ledger.push(tx);
+        metadata: { rate }
+      });
+      await tx.save();
 
       return { userId: wallet.userId, points: wallet.points, cashHalalas: wallet.cashHalalas };
     });
@@ -171,14 +173,17 @@ export class PointsWalletService {
 
     const release = await this.lockManager.acquire(userId);
     try {
-      const wallet = this.getOrCreateWallet(userId);
+      const wallet = await this.getOrCreateWallet(userId);
       return { userId: wallet.userId, points: wallet.points, cashHalalas: wallet.cashHalalas };
     } finally {
       release();
     }
   }
 
-  getLedger(): Transaction[] {
-    return [...this.ledger];
+  async getLedger(userId?: string) {
+    if (userId) {
+      return await TransactionModel.find({ userId }).sort({ timestamp: -1 });
+    }
+    return await TransactionModel.find().sort({ timestamp: -1 });
   }
 }

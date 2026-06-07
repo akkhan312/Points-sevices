@@ -1,79 +1,44 @@
 # Points-Wallet Service
 
-A robust points-wallet service implemented in Node.js and TypeScript.
+A production-ready points-wallet service built with Node.js, TypeScript, Express, and MongoDB. The service manages user point balances and point-to-cash conversions (stored in minor units/halalas) using strict idempotency controls and database-level concurrency locking.
 
 ## Features
 
-- **Award Points**: Securely award points to a user.
-- **Redeem Points**: Redeem points with strict non-negative balance checks.
-- **Convert Points to Cash**: Convert points to cash using float rates. Cash is strictly stored in **integer minor units (halalas)**, preventing float precision issues in financial values.
-- **Strict Idempotency**: Guarantees that duplicate requests with the same `requestId` return the exact cached result (or throw the same cached error) without processing again.
-- **Concurrency Safety**: Serializes requests on a per-user basis using a queue-based lock to prevent race conditions during concurrent transactions.
-- **Ledger Log**: Appends every operation to an immutable transaction ledger.
+- **Express API**: RESTful endpoints for awarding points, redeeming points, converting to cash, and fetching wallet state.
+- **MongoDB Integration**: Uses Mongoose for data persistence, atomic updates, and transactional safety.
+- **Concurrency Locks**: Uses an in-memory lock (`WalletLockManager`) per user, coupled with an idempotent request tracker stored in the database.
+- **Strict Idempotency**: Safe to retry requests. Uses a global registry in MongoDB to ensure only one instance of a request runs at a time.
+- **Halala Accuracy**: Cash balances are strictly maintained in integer minor units (halalas) to prevent precision issues.
 
----
+## Endpoints
 
-## Architectural & Design Choices
+- `POST /api/wallet/award`: Awards points to a user.
+- `POST /api/wallet/redeem`: Redeems points from a user.
+- `POST /api/wallet/convert`: Converts points to cash halalas (default rate: 0.5 halalas per point).
+- `GET /api/wallet/:userId`: Retrieves user wallet state.
+- `GET /api/wallet/:userId/ledger`: Retrieves user transaction history.
 
-### 1. Integer Minor Units (Halalas)
+**Required Header for POST requests:** `x-request-id` (must be unique for each request).
 
-Floating-point arithmetic is prone to rounding errors (e.g., `0.1 + 0.2 = 0.30000000000000004`), which is unacceptable for monetary values.
+## Running the Application
 
-- Money balances and changes are strictly stored and computed as **integers representing halalas**.
-- When converting points to cash with a conversion rate (e.g. `cash = points * rate`), the system uses `Math.floor()` to round down the resulting halalas to the nearest integer. This guarantees no fractional halalas (floats) enter the ledger or wallet state.
+1. Install dependencies:
+```bash
+npm install
+```
 
-### 2. Idempotency Strategy
+2. Start a MongoDB instance locally (or set `MONGO_URI` environment variable).
 
-To ensure that an operation is not processed twice (even under retries), every operation receives a `requestId`.
+3. Run the development server:
+```bash
+npm run build
+npm start
+```
 
-- We maintain a cache of processed request IDs (`processedRequests`).
-- Successful outcomes are stored along with their final state.
-- Validation failures (e.g. `Insufficient points balance`) are also cached, so subsequent retries with the same request ID throw the identical business validation error.
-- To prevent concurrent duplicate submissions of the same `requestId` (a race condition where both requests read empty caches before either finishes), we maintain a global `pendingRequests` set. If a duplicate `requestId` is received while the first is in progress, it is rejected immediately.
+## Running Tests
 
-### 3. Concurrency Locking
+Run the full integration test suite, which uses `mongodb-memory-server` and `supertest`:
 
-In asynchronous Node.js applications, operations yield control of the event loop during promise resolutions (e.g., database writes, network calls, locks). If two requests for the same user execute concurrently, they can read the same initial state and double-spend (race condition).
-
-- We implement a lightweight `UserLock` using a Promise chain queue.
-- Locks are grouped dynamically by `userId`.
-- This ensures that for a single user, transaction A must fully complete (updating balances, committing transactions, and writing cache) before transaction B starts.
-- Because locks are per-user, operations for _different_ users execute in parallel without any bottleneck.
-
----
-
-## Installation & Setup
-
-1. **Install Dependencies**:
-
-   ```bash
-   npm install
-   ```
-
-2. **Build TypeScript**:
-
-   ```bash
-   npm run build
-   ```
-
-3. **Run Unit Tests**:
-
-   ```bash
-   npm test
-   ```
-
-4. **Run Tests with Coverage**:
-
-   ```bash
-   npm run test:coverage
-   ```
-
-5. **Code Formatting (Prettier)**:
-
-   ```bash
-   # Automatically format all source and test files
-   npm run format
-
-   # Verify all files match style requirements
-   npm run format:check
-   ```
+```bash
+npm test
+```
