@@ -1,6 +1,8 @@
 import { WalletState } from './types';
 import { WalletLockManager } from './lock';
-import { WalletModel, TransactionModel, IdempotentRequestModel } from './db';
+import { WalletModel } from './models/Wallet';
+import { TransactionModel } from './models/Transaction';
+import { IdempotentRequestModel } from './models/IdempotentRequest';
 
 export class PointsWalletService {
   private lockManager = new WalletLockManager();

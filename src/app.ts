@@ -1,5 +1,5 @@
 import express from 'express';
-import { awardPoints, redeemPoints, convertPoints, getWallet, getLedger } from './controller';
+import { awardPoints, redeemPoints, convertPoints, getWallet, getLedger } from './controllers/wallet.controller';
 
 const app = express();
 app.use(express.json());

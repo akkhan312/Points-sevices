@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
-import { PointsWalletService } from './wallet.service';
-import { WalletModel, TransactionModel } from './db';
+import { PointsWalletService } from '../wallet.service';
+import { WalletModel } from '../models/Wallet';
+import { TransactionModel } from '../models/Transaction';
 
 const walletService = new PointsWalletService();
 
